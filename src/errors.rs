@@ -11,11 +11,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::StateRole;
 use std::error;
 use std::{cmp, io, result};
-use StateRole;
 
-use protobuf::ProtobufError;
+use prost::{DecodeError, EncodeError};
 
 quick_error! {
     /// The base error type for raft
@@ -49,12 +49,19 @@ quick_error! {
         ConfigInvalid(desc: String) {
             description(desc)
         }
-        /// A Protobuf message failed in some manner.
-        Codec(err: ProtobufError) {
+        /// A Prost message encode failed in some manner.
+        ProstEncode(err: EncodeError) {
             from()
             cause(err)
             description(err.description())
-            display("protobuf error {:?}", err)
+            display("prost encode error {:?}", err)
+        }
+        /// A Prost message decode failed in some manner.
+        ProstDecode(err: DecodeError) {
+            from()
+            cause(err)
+            description(err.description())
+            display("prost decode error {:?}", err)
         }
         /// The node exists, but should not.
         Exists(id: u64, set: &'static str) {
@@ -115,7 +122,7 @@ quick_error! {
             description("snapshot is temporarily unavailable")
         }
         /// Some other error occurred.
-        Other(err: Box<error::Error + Sync + Send>) {
+        Other(err: Box<dyn error::Error + Sync + Send>) {
             from()
             cause(err.as_ref())
             description(err.description())
@@ -146,7 +153,7 @@ pub type Result<T> = result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use setup_for_test;
+    use harness::setup_for_test;
     use std::io;
 
     #[test]
@@ -181,10 +188,6 @@ mod tests {
         assert_ne!(
             Error::StepPeerNotFound,
             Error::Store(StorageError::Compacted)
-        );
-        assert_ne!(
-            Error::Codec(ProtobufError::MessageNotInitialized { message: "" }),
-            Error::StepLocalMsg
         );
     }
 

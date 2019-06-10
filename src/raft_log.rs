@@ -27,14 +27,14 @@
 
 use std::cmp;
 
-use eraftpb::{Entry, Snapshot};
+use crate::eraftpb::{Entry, Snapshot};
 
-use errors::{Error, Result, StorageError};
-use log_unstable::Unstable;
-use storage::Storage;
-use util;
+use crate::errors::{Error, Result, StorageError};
+use crate::log_unstable::Unstable;
+use crate::storage::Storage;
+use crate::util;
 
-pub use util::NO_LIMIT;
+pub use crate::util::NO_LIMIT;
 
 /// Raft log implementation
 #[derive(Default)]
@@ -181,17 +181,17 @@ impl<T: Storage> RaftLog<T> {
     /// The index of the given entries MUST be continuously increasing.
     pub fn find_conflict(&self, ents: &[Entry]) -> u64 {
         for e in ents {
-            if !self.match_term(e.get_index(), e.get_term()) {
-                if e.get_index() <= self.last_index() {
+            if !self.match_term(e.index, e.term) {
+                if e.index <= self.last_index() {
                     info!(
                         "{} found conflict at index {}, [existing term:{}, conflicting term:{}]",
                         self.tag,
-                        e.get_index(),
-                        self.term(e.get_index()).unwrap_or(0),
-                        e.get_term()
+                        e.index,
+                        self.term(e.index).unwrap_or(0),
+                        e.term
                     );
                 }
-                return e.get_index();
+                return e.index;
             }
         }
         0
@@ -306,7 +306,7 @@ impl<T: Storage> RaftLog<T> {
             return self.last_index();
         }
 
-        let after = ents[0].get_index() - 1;
+        let after = ents[0].index - 1;
         if after < self.committed {
             panic!(
                 "{} after {} is out of range [committed {}]",
@@ -326,7 +326,8 @@ impl<T: Storage> RaftLog<T> {
     }
 
     /// Returns entries starting from a particular index and not exceeding a bytesize.
-    pub fn entries(&self, idx: u64, max_size: u64) -> Result<Vec<Entry>> {
+    pub fn entries(&self, idx: u64, max_size: impl Into<Option<u64>>) -> Result<Vec<Entry>> {
+        let max_size = max_size.into();
         let last = self.last_index();
         if idx > last {
             return Ok(Vec::new());
@@ -337,7 +338,7 @@ impl<T: Storage> RaftLog<T> {
     /// Returns all the entries.
     pub fn all_entries(&self) -> Vec<Entry> {
         let first_index = self.first_index();
-        match self.entries(first_index, NO_LIMIT) {
+        match self.entries(first_index, None) {
             Err(e) => {
                 // try again if there was a racing compaction
                 if e == Error::Store(StorageError::Compacted) {
@@ -364,7 +365,7 @@ impl<T: Storage> RaftLog<T> {
         let offset = cmp::max(since_idx + 1, self.first_index());
         let committed = self.committed;
         if committed + 1 > offset {
-            match self.slice(offset, committed + 1, NO_LIMIT) {
+            match self.slice(offset, committed + 1, None) {
                 Ok(vec) => return Some(vec),
                 Err(e) => panic!("{} {}", self.tag, e),
             }
@@ -434,7 +435,13 @@ impl<T: Storage> RaftLog<T> {
 
     /// Grabs a slice of entries from the raft. Unlike a rust slice pointer, these are
     /// returned by value. The result is truncated to the max_size in bytes.
-    pub fn slice(&self, low: u64, high: u64, max_size: u64) -> Result<Vec<Entry>> {
+    pub fn slice(
+        &self,
+        low: u64,
+        high: u64,
+        max_size: impl Into<Option<u64>>,
+    ) -> Result<Vec<Entry>> {
+        let max_size = max_size.into();
         let err = self.must_check_outofbounds(low, high);
         if err.is_some() {
             return Err(err.unwrap());
@@ -483,10 +490,10 @@ impl<T: Storage> RaftLog<T> {
             "{} log [{}] starts to restore snapshot [index: {}, term: {}]",
             self.tag,
             self.to_string(),
-            snapshot.get_metadata().get_index(),
-            snapshot.get_metadata().get_term()
+            snapshot.get_metadata().index,
+            snapshot.get_metadata().term
         );
-        self.committed = snapshot.get_metadata().get_index();
+        self.committed = snapshot.get_metadata().index;
         self.unstable.restore(snapshot);
     }
 }
@@ -495,29 +502,29 @@ impl<T: Storage> RaftLog<T> {
 mod test {
     use std::panic::{self, AssertUnwindSafe};
 
-    use eraftpb;
-    use errors::{Error, StorageError};
-    use protobuf;
-    use raft_log::{self, RaftLog};
-    use setup_for_test;
-    use storage::MemStorage;
+    use crate::eraftpb;
+    use crate::errors::{Error, StorageError};
+    use crate::raft_log::{self, RaftLog};
+    use crate::storage::MemStorage;
+    use harness::setup_for_test;
+    use prost::Message as ProstMsg;
 
     fn new_raft_log(s: MemStorage) -> RaftLog<MemStorage> {
         RaftLog::new(s, String::from(""))
     }
 
     fn new_entry(index: u64, term: u64) -> eraftpb::Entry {
-        let mut e = eraftpb::Entry::new();
+        let mut e = eraftpb::Entry::default();
         e.set_term(term);
         e.set_index(index);
         e
     }
 
     fn new_snapshot(meta_index: u64, meta_term: u64) -> eraftpb::Snapshot {
-        let mut meta = eraftpb::SnapshotMetadata::new();
+        let mut meta = eraftpb::SnapshotMetadata::default();
         meta.set_index(meta_index);
         meta.set_term(meta_term);
-        let mut snapshot = eraftpb::Snapshot::new();
+        let mut snapshot = eraftpb::Snapshot::default();
         snapshot.set_metadata(meta);
         snapshot
     }
@@ -639,7 +646,7 @@ mod test {
             if index != windex {
                 panic!("#{}: last_index = {}, want {}", i, index, windex);
             }
-            match raft_log.entries(1, raft_log::NO_LIMIT) {
+            match raft_log.entries(1, None) {
                 Err(e) => panic!("#{}: unexpected error {}", i, e),
                 Ok(ref g) if g != wents => panic!("#{}: logEnts = {:?}, want {:?}", i, &g, &wents),
                 _ => {
@@ -692,7 +699,7 @@ mod test {
         {
             let unstable_ents = raft_log.unstable_entries().expect("should have content.");
             assert_eq!(250, unstable_ents.len());
-            assert_eq!(751, unstable_ents[0].get_index());
+            assert_eq!(751, unstable_ents[0].index);
         }
 
         let mut prev = raft_log.last_index();
@@ -700,9 +707,7 @@ mod test {
         assert_eq!(prev + 1, raft_log.last_index());
 
         prev = raft_log.last_index();
-        let ents = raft_log
-            .entries(prev, raft_log::NO_LIMIT)
-            .expect("unexpected error");
+        let ents = raft_log.entries(prev, None).expect("unexpected error");
         assert_eq!(1, ents.len());
     }
 
@@ -896,12 +901,12 @@ mod test {
             let ents = raft_log.unstable_entries().unwrap_or(&[]).to_vec();
             let l = ents.len();
             if l > 0 {
-                raft_log.stable_to(ents[l - 1].get_index(), ents[l - i].get_term());
+                raft_log.stable_to(ents[l - 1].index, ents[l - i].term);
             }
             if &ents != wents {
                 panic!("#{}: unstableEnts = {:?}, want {:?}", i, ents, wents);
             }
-            let w = previous_ents[previous_ents.len() - 1].get_index() + 1;
+            let w = previous_ents[previous_ents.len() - 1].index + 1;
             let g = raft_log.unstable.offset;
             if g != w {
                 panic!("#{}: unstable = {}, want {}", i, g, w);
@@ -966,7 +971,8 @@ mod test {
         let (offset, num) = (100u64, 100u64);
         let (last, half) = (offset + num, offset + num / 2);
         let halfe = new_entry(half, half);
-        let halfe_size = u64::from(protobuf::Message::compute_size(&halfe));
+
+        let halfe_size = ProstMsg::encoded_len(&halfe) as u64;
 
         let store = MemStorage::new();
         store
@@ -1067,7 +1073,8 @@ mod test {
         ];
 
         for (i, &(from, to, limit, ref w, wpanic)) in tests.iter().enumerate() {
-            let res = panic::catch_unwind(AssertUnwindSafe(|| raft_log.slice(from, to, limit)));
+            let res =
+                panic::catch_unwind(AssertUnwindSafe(|| raft_log.slice(from, to, Some(limit))));
             if res.is_err() ^ wpanic {
                 panic!("#{}: panic = {}, want {}: {:?}", i, true, false, res);
             }
@@ -1269,7 +1276,7 @@ mod test {
                     raft_log.last_index() - ents_len + 1,
                     raft_log.last_index() + 1,
                 );
-                let gents = raft_log.slice(from, to, raft_log::NO_LIMIT).expect("");
+                let gents = raft_log.slice(from, to, None).expect("");
                 if &gents != ents {
                     panic!("#{}: appended entries = {:?}, want {:?}", i, gents, ents);
                 }
@@ -1310,24 +1317,24 @@ mod test {
         setup_for_test();
         let tests = vec![
             // out of upper bound
-            (1000, vec![1001u64], vec![0usize], false),
+            (1000, vec![1001u64], vec![0usize], true),
             (
                 1000,
                 vec![300, 500, 800, 900],
                 vec![700, 500, 200, 100],
-                true,
+                false,
             ),
             // out of lower bound
-            (1000, vec![300, 299], vec![700, 0], false),
+            (1000, vec![300, 299], vec![700, 700], false),
         ];
 
-        for (i, &(last_index, ref compact, ref wleft, wallow)) in tests.iter().enumerate() {
+        for (i, &(index, ref compact, ref wleft, should_panic)) in tests.iter().enumerate() {
             let store = MemStorage::new();
-            for i in 1u64..=last_index {
+            for i in 1u64..index {
                 store.wl().append(&[new_entry(i, 0)]).expect("");
             }
             let mut raft_log = new_raft_log(store);
-            raft_log.maybe_commit(last_index, 0);
+            raft_log.maybe_commit(index - 1, 0);
             let committed = raft_log.committed;
             #[allow(deprecated)]
             raft_log.applied_to(committed);
@@ -1335,22 +1342,14 @@ mod test {
             for (j, idx) in compact.into_iter().enumerate() {
                 let res =
                     panic::catch_unwind(AssertUnwindSafe(|| raft_log.store.wl().compact(*idx)));
-                if res.is_err() {
-                    if wallow {
-                        panic!("#{}: has_panic = true, want false: {:?}", i, res);
-                    }
-                    continue;
+                if !(should_panic ^ res.is_ok()) {
+                    panic!("#{}: should_panic: {}, but got: {:?}", i, should_panic, res);
                 }
-                let compact_res = res.unwrap();
-                if let Err(e) = compact_res {
-                    if wallow {
-                        panic!("#{}.{} allow = false, want true, error: {}", i, j, e);
+                if !should_panic {
+                    let l = raft_log.all_entries().len();
+                    if l != wleft[j] {
+                        panic!("#{}.{} len = {}, want {}", i, j, l, wleft[j]);
                     }
-                    continue;
-                }
-                let l = raft_log.all_entries().len();
-                if l != wleft[j] {
-                    panic!("#{}.{} len = {}, want {}", i, j, l, wleft[j]);
                 }
             }
         }

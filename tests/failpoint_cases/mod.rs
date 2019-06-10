@@ -11,10 +11,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::test_util::*;
 use fail;
+use harness::setup_for_test;
 use raft::eraftpb::MessageType;
 use std::sync::*;
-use test_util::*;
 
 lazy_static! {
     /// Failpoints are global structs, hence rules set in different cases
@@ -42,7 +43,7 @@ fn test_reject_stale_term_message() {
     let _guard = setup();
     let mut r = new_test_raft(1, vec![1, 2, 3], 10, 1, new_storage());
     fail::cfg("before_step", "panic").unwrap();
-    r.load_state(&hard_state(2, 0, 0));
+    r.load_state(&hard_state(2, 1, 0));
 
     let mut m = new_message(0, 0, MessageType::MsgAppend, 0);
     m.set_term(r.term - 1);

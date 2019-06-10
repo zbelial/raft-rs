@@ -2,6 +2,8 @@
 
 [![Build Status](https://travis-ci.org/pingcap/raft-rs.svg?branch=master)](https://travis-ci.org/pingcap/raft-rs)
 [![Documentation](https://docs.rs/raft/badge.svg)](https://docs.rs/raft/)
+[![Crates.io](https://img.shields.io/crates/v/raft.svg)](https://crates.io/crates/raft)
+[![dependency status](https://deps.rs/repo/github/pingcap/raft-rs/status.svg)](https://deps.rs/repo/github/pingcap/raft-rs)
 
 ## Problem and Importance
 
@@ -31,20 +33,20 @@ A complete Raft model contains 4 essential parts:
 
 ## Developing the Raft crate
 
-`raft` is intended to track the latest `stable`, though you'll need to use `nightly` to simulate a full CI build with `clippy`.
+`Raft` is built using the latest version of `stable` Rust, using [the 2018 edition](https://doc.rust-lang.org/edition-guide/rust-2018/).
 
 Using `rustup` you can get started this way:
 
 ```bash
-rustup component add clippy-preview
-rustup component add rustfmt-preview
+rustup component add clippy
+rustup component add rustfmt
 ```
 
 In order to have your PR merged running the following must finish without error:
 
 ```bash
 cargo test --all && \
-cargo clippy --all -- -D clippy && \
+cargo clippy --all -- -D clippy::all && \
 cargo fmt --all -- --check
 ```
 
@@ -59,10 +61,14 @@ cargo watch -s "cargo check"
 If proto file `eraftpb.proto` changed, run the command to regenerate `eraftpb.rs`:
 
 ```bash
-protoc proto/eraftpb.proto --rust_out=src
+cargo build --features gen
 ```
 
-You can check `Cargo.toml` to find which version of `protobuf-codegen` is required.
+or using Cargo watch:
+
+```bash
+cargo watch -s "cargo check --features gen"
+```
 
 ### Benchmarks
 

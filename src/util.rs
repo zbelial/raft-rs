@@ -16,8 +16,8 @@
 
 use std::u64;
 
-use eraftpb::{ConfChange, ConfChangeType, ConfState};
-use protobuf::Message;
+use crate::eraftpb::{ConfChange, ConfChangeType, ConfState, Entry, Message};
+use prost::Message as ProstMsg;
 
 /// A number to represent that there is no limit.
 pub const NO_LIMIT: u64 = u64::MAX;
@@ -31,7 +31,7 @@ pub const NO_LIMIT: u64 = u64::MAX;
 /// use raft::{util::limit_size, prelude::*};
 ///
 /// let template = {
-///     let mut entry = Entry::new();
+///     let mut entry = Entry::default();
 ///     entry.set_data("*".repeat(100).into_bytes());
 ///     entry
 /// };
@@ -46,23 +46,31 @@ pub const NO_LIMIT: u64 = u64::MAX;
 /// ];
 ///
 /// assert_eq!(entries.len(), 5);
-/// limit_size(&mut entries, 220);
+/// limit_size(&mut entries, Some(220));
 /// assert_eq!(entries.len(), 2);
+///
+/// // `entries` will always have at least 1 Message
+/// limit_size(&mut entries, Some(0));
+/// assert_eq!(entries.len(), 1);
 /// ```
-pub fn limit_size<T: Message + Clone>(entries: &mut Vec<T>, max: u64) {
-    if max == NO_LIMIT || entries.len() <= 1 {
+pub fn limit_size<T: ProstMsg + Clone>(entries: &mut Vec<T>, max: Option<u64>) {
+    if entries.len() <= 1 {
         return;
     }
+    let max = match max {
+        None | Some(NO_LIMIT) => return,
+        Some(max) => max,
+    };
 
     let mut size = 0;
     let limit = entries
         .iter()
         .take_while(|&e| {
             if size == 0 {
-                size += u64::from(Message::compute_size(e));
+                size += ProstMsg::encoded_len(e) as u64;
                 true
             } else {
-                size += u64::from(Message::compute_size(e));
+                size += ProstMsg::encoded_len(e) as u64;
                 size <= max
             }
         })
@@ -73,19 +81,42 @@ pub fn limit_size<T: Message + Clone>(entries: &mut Vec<T>, max: u64) {
 
 // Bring some consistency to things. The protobuf has `nodes` and it's not really a term that's used anymore.
 impl ConfState {
-    /// Get the voters. This is identical to `get_nodes()`.
+    /// Get the voters. This is identical to `nodes`.
     #[inline]
     pub fn get_voters(&self) -> &[u64] {
-        self.get_nodes()
+        &self.nodes
+    }
+}
+
+impl<Iter1, Iter2> From<(Iter1, Iter2)> for ConfState
+where
+    Iter1: IntoIterator<Item = u64>,
+    Iter2: IntoIterator<Item = u64>,
+{
+    fn from((voters, learners): (Iter1, Iter2)) -> Self {
+        let mut conf_state = ConfState::default();
+        conf_state.mut_nodes().extend(voters.into_iter());
+        conf_state.mut_learners().extend(learners.into_iter());
+        conf_state
     }
 }
 
 impl From<(u64, ConfState)> for ConfChange {
     fn from((start_index, state): (u64, ConfState)) -> Self {
-        let mut change = ConfChange::new();
+        let mut change = ConfChange::default();
         change.set_change_type(ConfChangeType::BeginMembershipChange);
         change.set_configuration(state);
         change.set_start_index(start_index);
         change
     }
+}
+
+/// Check whether the entry is continuous to the message.
+/// i.e msg's next entry index should be equal to the first entries's index
+pub fn is_continuous_ents(msg: &Message, ents: &[Entry]) -> bool {
+    if !msg.entries.is_empty() && !ents.is_empty() {
+        let expected_next_idx = msg.entries.last().unwrap().index + 1;
+        return expected_next_idx == ents.first().unwrap().index;
+    }
+    true
 }

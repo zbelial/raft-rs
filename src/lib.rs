@@ -44,16 +44,15 @@ use raft::{
 // Select some defaults, then change what we need.
 let config = Config {
     id: 1,
-    peers: vec![1],
     ..Default::default()
 };
-let storage = MemStorage::default();
 // ... Make any configuration changes.
 // After, make sure it's valid!
 config.validate().unwrap();
 // We'll use the built-in `MemStorage`, but you will likely want your own.
 // Finally, create our Raft node!
-let mut node = RawNode::new(&config, storage, vec![]).unwrap();
+let storage = MemStorage::new_with_conf_state((vec![1], vec![]));
+let mut node = RawNode::new(&config, storage).unwrap();
 // We will coax it into being the lead of a single node cluster for exploration.
 node.raft.become_candidate();
 node.raft.become_leader();
@@ -67,8 +66,9 @@ channel `recv_timeout` to drive the Raft node at least every 100ms, calling
 
 ```rust
 # use raft::{Config, storage::MemStorage, raw_node::RawNode};
-# let config = Config { id: 1, peers: vec![1], ..Default::default() };
-# let mut node = RawNode::new(&config, MemStorage::default(), vec![]).unwrap();
+# let config = Config { id: 1, ..Default::default() };
+# let store = MemStorage::new_with_conf_state((vec![1], vec![]));
+# let mut node = RawNode::new(&config, store).unwrap();
 # node.raft.become_candidate();
 # node.raft.become_leader();
 use std::{sync::mpsc::{channel, RecvTimeoutError}, time::{Instant, Duration}};
@@ -131,8 +131,9 @@ Here is a simple example to use `propose` and `step`:
 #     collections::HashMap
 # };
 #
-# let config = Config { id: 1, peers: vec![1], ..Default::default() };
-# let mut node = RawNode::new(&config, MemStorage::default(), vec![]).unwrap();
+# let config = Config { id: 1, ..Default::default() };
+# let store = MemStorage::new_with_conf_state((vec![1], vec![]));
+# let mut node = RawNode::new(&config, store).unwrap();
 # node.raft.become_candidate();
 # node.raft.become_leader();
 #
@@ -261,14 +262,14 @@ need to update the applied index and resume `apply` later:
         for entry in committed_entries {
             // Mostly, you need to save the last apply index to resume applying
             // after restart. Here we just ignore this because we use a Memory storage.
-            _last_apply_index = entry.get_index();
+            _last_apply_index = entry.index;
 
-            if entry.get_data().is_empty() {
+            if entry.data.is_empty() {
                 // Emtpy entry, when the peer becomes Leader it will send an empty entry.
                 continue;
             }
 
-            match entry.get_entry_type() {
+            match entry.entry_type() {
                 EntryType::EntryNormal => handle_normal(entry),
                 EntryType::EntryConfChange => handle_conf_change(entry),
             }
@@ -315,9 +316,11 @@ This must be done as a two stage process for now.
 This means it's possible to do:
 
 ```rust
-use raft::{Config, storage::MemStorage, raw_node::RawNode, eraftpb::{Message, ConfChange}};
-let config = Config { id: 1, peers: vec![1, 2], ..Default::default() };
-let mut node = RawNode::new(&config, MemStorage::default(), vec![]).unwrap();
+use raft::{Config, storage::MemStorage, raw_node::RawNode, eraftpb::*};
+use prost::Message as ProstMsg;
+let mut config = Config { id: 1, ..Default::default() };
+let store = MemStorage::new_with_conf_state((vec![1, 2], vec![]));
+let mut node = RawNode::new(&mut config, store).unwrap();
 node.raft.become_candidate();
 node.raft.become_leader();
 
@@ -329,11 +332,11 @@ node.raft.propose_membership_change((
     // Learners
     vec![4,5,6], // Add 4, 5, 6.
 )).unwrap();
+# let idx = node.raft.raft_log.last_index();
 
-# let entry = &node.raft.raft_log.entries(2, 1).unwrap()[0];
+# let entry = &node.raft.raft_log.entries(idx, 1).unwrap()[0];
 // ...Later when the begin entry is recieved from a `ready()` in the `entries` field...
-let conf_change = protobuf::parse_from_bytes::<ConfChange>(entry.get_data())
-    .unwrap();
+let conf_change = ConfChange::decode(&entry.data).unwrap();
 node.raft.begin_membership_change(&conf_change).unwrap();
 assert!(node.raft.is_in_membership_change());
 assert!(node.raft.prs().voter_ids().contains(&2));
@@ -341,13 +344,13 @@ assert!(node.raft.prs().voter_ids().contains(&3));
 #
 # // We hide this since the user isn't really encouraged to blindly call this, but we'd like a short
 # // example.
-# node.raft.raft_log.commit_to(2);
-# node.raft.commit_apply(2);
+# node.raft.raft_log.commit_to(idx);
+# node.raft.commit_apply(idx);
 #
-# let entry = &node.raft.raft_log.entries(3, 1).unwrap()[0];
+# let idx = node.raft.raft_log.last_index();
+# let entry = &node.raft.raft_log.entries(idx, 1).unwrap()[0];
 // ...Later, when the finalize entry is recieved from a `ready()` in the `entries` field...
-let conf_change = protobuf::parse_from_bytes::<ConfChange>(entry.get_data())
-    .unwrap();
+let conf_change = ConfChange::decode(&entry.data).unwrap();
 node.raft.finalize_membership_change(&conf_change).unwrap();
 assert!(!node.raft.prs().voter_ids().contains(&2));
 assert!(node.raft.prs().voter_ids().contains(&3));
@@ -365,26 +368,24 @@ before taking old, removed peers offline.
 
 #![deny(clippy::all)]
 #![deny(missing_docs)]
+#![recursion_limit = "128"]
 
 #[cfg(feature = "failpoint")]
 #[macro_use]
 extern crate fail;
-extern crate hashbrown;
+
 #[macro_use]
 extern crate log;
-extern crate protobuf;
 #[macro_use]
 extern crate quick_error;
-#[cfg(test)]
-extern crate env_logger;
-extern crate rand;
 #[macro_use]
 extern crate getset;
 
 mod config;
+mod prost;
 /// This module supplies the needed message types. However, it is autogenerated and thus cannot be
 /// documented by field.
-pub mod eraftpb;
+pub use crate::prost::eraftpb;
 mod errors;
 mod log_unstable;
 mod progress;
@@ -402,7 +403,9 @@ pub mod util;
 pub use self::config::Config;
 pub use self::errors::{Error, Result, StorageError};
 pub use self::log_unstable::Unstable;
-pub use self::progress::{Configuration, Inflights, Progress, ProgressSet, ProgressState};
+pub use self::progress::inflights::Inflights;
+pub use self::progress::progress_set::{Configuration, ProgressSet};
+pub use self::progress::{Progress, ProgressState};
 pub use self::raft::{vote_resp_msg_type, Raft, SoftState, StateRole, INVALID_ID, INVALID_INDEX};
 pub use self::raft_log::{RaftLog, NO_LIMIT};
 pub use self::raw_node::{is_empty_snap, Peer, RawNode, Ready, SnapshotStatus};
@@ -423,27 +426,21 @@ pub mod prelude {
     //!
     //! The prelude may grow over time as additional items see ubiquitous use.
 
-    pub use eraftpb::{
+    pub use crate::eraftpb::{
         ConfChange, ConfChangeType, ConfState, Entry, EntryType, HardState, Message, MessageType,
         Snapshot, SnapshotMetadata,
     };
 
-    pub use config::Config;
-    pub use raft::Raft;
+    pub use crate::config::Config;
+    pub use crate::raft::Raft;
 
-    pub use storage::{RaftState, Storage};
+    pub use crate::storage::{RaftState, Storage};
 
-    pub use raw_node::{Peer, RawNode, Ready, SnapshotStatus};
+    pub use crate::raw_node::{Peer, RawNode, Ready, SnapshotStatus};
 
-    pub use progress::Progress;
+    pub use crate::progress::Progress;
 
-    pub use status::Status;
+    pub use crate::status::Status;
 
-    pub use read_only::{ReadOnlyOption, ReadState};
-}
-
-/// Do any common test initialization. Eg set up logging, setup fail-rs.
-#[cfg(test)]
-fn setup_for_test() {
-    let _ = env_logger::try_init();
+    pub use crate::read_only::{ReadOnlyOption, ReadState};
 }
